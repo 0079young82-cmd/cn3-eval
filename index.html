@@ -259,8 +259,8 @@ function viewStart(q){
     <div class="card">
       <h2 style="margin-top:0">${vid ? '②' : '①'} 강의 수강 확인 (출석)</h2>
       ${code ? `<p class="chip">✔ 수강 확인 완료</p><p class="muted" style="margin-bottom:0">${lec} 강의 수강이 확인되었습니다.</p>` : `
-      <p class="muted" style="margin-top:0">${lec} 강의 영상 <b>마지막 '오늘의 정리' 슬라이드</b>에 나오는 수강 확인 코드를 입력하세요.</p>
-      <label for="code">수강 확인 코드</label><input id="code" autocomplete="off" placeholder="강의 마지막 화면의 단어">
+      <p class="muted" style="margin-top:0">${lec} 강의를 끝까지 들었다면 아래에 체크하세요. 체크한 시각이 수강 기록으로 남습니다. 강의 마지막 화면에 <b>수강 확인 코드</b>가 있으면 함께 입력하세요.</p>
+      <label for="code">수강 확인 코드 <span class="muted">(마지막 화면에 코드가 없으면 비워 두세요)</span></label><input id="code" autocomplete="off" placeholder="코드가 있을 때만 입력">
       <label style="display:flex;gap:8px;align-items:center;font-weight:500"><input type="checkbox" id="agree" style="width:auto;margin:0"> 강의를 끝까지 들었습니다.</label>`}
     </div>
     <div class="card">
@@ -279,16 +279,15 @@ function viewStart(q){
     if (code) { go('#/solve/' + q.id); return; }
     const v = document.getElementById('code').value.trim(), msg = document.getElementById('msg');
     if (vid && watchState(q.id).pct < PASS) { msg.textContent = '강의를 ' + PASS + '% 이상 시청한 뒤 수강 확인을 할 수 있습니다. (현재 ' + watchState(q.id).pct + '%)'; return; }
-    if (!v) { msg.textContent = '수강 확인 코드를 입력하세요.'; return; }
     if (!document.getElementById('agree').checked) { msg.textContent = '"강의를 끝까지 들었습니다"에 체크하세요.'; return; }
-    if (!connected()) { LS.set('code_' + q.id, v); go('#/solve/' + q.id); return; }
+    if (!connected()) { LS.set('code_' + q.id, v || '-'); go('#/solve/' + q.id); return; }
     const st = LS.get('student'), btn = document.getElementById('st');
     btn.disabled = true; btn.textContent = '확인 중…';
     try {
       if (window.__flushWatch) await window.__flushWatch();
       const res = await api({ action: 'confirm', w: q.id, sid: st.sid, name: st.name, code: v });
       if (!res.ok) throw new Error(res.error || '확인 실패');
-      LS.set('code_' + q.id, v); go('#/solve/' + q.id);
+      LS.set('code_' + q.id, v || '-'); go('#/solve/' + q.id);
     } catch (e) {
       msg.textContent = e.message; btn.disabled = false; btn.textContent = '수강 확인하고 시작하기';
     }
@@ -370,7 +369,7 @@ function viewSolve(q){
     const st = LS.get('student');
     $app.innerHTML = '<div class="spin"></div><p class="muted" style="text-align:center">채점 중입니다…</p>';
     try {
-const res = await api({ w: q.id, sid: st.sid, name: st.name, answers: d.ans, code: LS.get('code_' + q.id, ''), secs: Math.round((Date.now() - d.t0) / 1000) });
+const res = await api({ w: q.id, sid: st.sid, name: st.name, answers: d.ans, code: (LS.get('code_' + q.id, '') === '-' ? '' : LS.get('code_' + q.id, '')), secs: Math.round((Date.now() - d.t0) / 1000) });
       if (res.codeError) LS.del('code_' + q.id);
       if (!res.ok) throw new Error(res.error || '제출 실패');
       const done = LS.get('done', {}); done[q.id] = { score: res.score, at: Date.now() }; LS.set('done', done);
@@ -461,7 +460,7 @@ async function viewAdmin(){
       <div class="tbl"><table><tr><th>학번</th><th>이름</th>${ids.map(k => `<th>${short(k)}</th>`).join('')}<th>출석</th><th>결석</th></tr>
       ${students.map(s => `<tr><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>${ids.map(k => { const x = s.q[k], c = COLORS[x.status]; return `<td style="background:${c[0]};color:${c[1]};font-weight:700">${x.status}${x.watch ? `<br><span style="font-weight:500">시청 ${x.watch.pct}%</span>` : ''}${x.score !== null ? `<br><span style="font-weight:500">${x.score}점</span>` : ''}${x.firstAt ? `<br><span class="muted" style="font-size:12px">${md(x.firstAt)}</span>` : ''}</td>`; }).join('')}<td><b>${ids.filter(k => s.q[k].status === '출석' || s.q[k].status === '지각').length}/${ids.length}</b></td><td>${ids.filter(k => s.q[k].status === '결석').length}</td></tr>`).join('')}
       </table></div>
-      <p class="muted">출석 = 수강 확인 코드 입력 + 평가 제출(마감 전) · 지각 = 마감 후 제출 · 미제출 = 수강 확인만 하고 미제출 · 결석 = 기록 없음. 마감일은 Code.gs의 DEADLINE에서 정합니다. 점수는 모두 <b>처음 제출한 점수</b>입니다.</p>`;
+      <p class="muted">출석 = 수강 확인(체크·코드) + 평가 제출(마감 전) · 지각 = 마감 후 제출 · 미제출 = 수강 확인만 하고 미제출 · 결석 = 기록 없음. 마감일은 Code.gs의 DEADLINE에서 정합니다. 점수는 모두 <b>처음 제출한 점수</b>입니다.</p>`;
   }
   const dt = t => t ? new Date(t).toLocaleString('ko-KR', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '–';
   let stuIdx = 0;
