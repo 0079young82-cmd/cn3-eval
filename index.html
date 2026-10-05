@@ -15,7 +15,17 @@
 <script>
 /* ▼▼▼ 설정: Apps Script 웹 앱 URL을 따옴표 안에 붙여넣으세요 (https://script.google.com/macros/s/.../exec) ▼▼▼ */
 window.ENDPOINT = "";
-/* ▲▲▲ 이 한 줄만 고치면 됩니다 ▲▲▲ */
+/* ▲▲▲ 위 한 줄은 꼭 고쳐야 합니다 ▲▲▲ */
+/* (선택) 녹화강의를 유튜브 '일부 공개'로 올렸다면 주차별 주소를 넣으세요. 넣으면 앱 안에서 강의를 보고 시청률이 기록됩니다. */
+window.VIDEOS = {
+  "0": "",
+  "2": "",
+  "3": "",
+  "4": "",
+  "5": "",
+  "6": "",
+  "7": ""
+};
 </script>
 <style>
 :root{--pine:#143B3A;--pine2:#1E4E4C;--bg:#F2F5F1;--card:#FFFFFF;--line:#D3DDD8;--ink:#1C2B2A;--muted:#5A6B68;--amber:#D9822B;--amberT:#9A5212;--tint:#FBEAD6;--ok:#2F7D45;--okT:#E3F1E6;--no:#B8342A;--noT:#F8E1DE}
@@ -131,8 +141,29 @@ document.getElementById('me').onclick = async () => {
   if (await ask('학번·이름을 다시 입력할까요? (이 기기에 저장된 응시 기록 표시는 지워집니다)')) { LS.del('student'); LS.del('done'); go('#/'); }
 };
 
+/* ---------- 서버 통신 ---------- */
+async function api(body){
+  let r;
+  try {
+    r = await fetch(window.ENDPOINT, { method: 'POST', headers: {'Content-Type': 'text/plain;charset=utf-8'}, body: JSON.stringify(body) });
+  } catch (e) { throw new Error('채점 서버에 연결할 수 없습니다. 인터넷 연결을 확인하고 잠시 후 다시 시도하세요.'); }
+  let j;
+  try { j = await r.json(); } catch (e) { throw new Error('채점 서버 응답을 읽을 수 없습니다. 교수님께 알려 주세요(서버 배포 설정 확인 필요).'); }
+  return j;
+}
+let TIMERS = [];
+function clearTimers(){ TIMERS.forEach(t => clearInterval(t)); TIMERS = []; if (window.__flushWatch) { window.__flushWatch(); window.__flushWatch = null; } }
+
 /* ---------- 라우터 ---------- */
 function route(){
+  clearTimers();
+  const stu = LS.get('student', null);
+  if (stu && connected() && !SS.get('cn3_logged')) {
+    SS.set('cn3_logged', '1');
+    api({ action: 'login', sid: stu.sid, name: stu.name, device: navigator.userAgent }).then(r => {
+      if (r && r.rosterError) { LS.del('student'); SS.del('cn3_logged'); tell(r.error).then(() => go('#/')); }
+    }).catch(() => SS.del('cn3_logged'));
+  }
   const h = location.hash.replace(/^#\/?/, '');
   const [page, id] = h.split('/');
   if (page === 'admin') return viewAdmin();
@@ -163,8 +194,14 @@ function viewLogin(next){
     const sid = document.getElementById('sid').value.trim(), name = document.getElementById('nm').value.trim();
     if (!/^[0-9A-Za-z-]{4,20}$/.test(sid)) return document.getElementById('msg').textContent = '학번을 정확히 입력하세요 (숫자 4자리 이상).';
     if (!name) return document.getElementById('msg').textContent = '이름을 입력하세요.';
-    LS.set('student', {sid, name});
-    go(next ? '#/' + next : '#/');
+    const msg = document.getElementById('msg'), btn = document.getElementById('go');
+    if (!connected()) { LS.set('student', {sid, name}); go(next ? '#/' + next : '#/'); return; }
+    btn.disabled = true; btn.textContent = '확인 중…';
+    api({ action: 'login', sid, name, device: navigator.userAgent }).then(res => {
+      if (!res.ok) throw new Error(res.error);
+      LS.set('student', {sid, name}); SS.set('cn3_logged', '1');
+      go(next ? '#/' + next : '#/');
+    }).catch(e => { msg.style.color = '#B8342A'; msg.textContent = e.message; btn.disabled = false; btn.textContent = '시작하기'; });
   };
 }
 
@@ -192,26 +229,116 @@ function viewHome(){
 }
 
 /* ---------- 시작 안내 ---------- */
+function ytId(u){ const m = String(u || '').match(/(?:youtu\.be\/|[?&]v=|embed\/|shorts\/|live\/)([\w-]{11})/); return m ? m[1] : ''; }
+function loadYT(){
+  if (window.YT && window.YT.Player) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => { if (prev) prev(); res(); };
+    if (!document.getElementById('ytapi')) { const t = document.createElement('script'); t.id = 'ytapi'; t.src = 'https://www.youtube.com/iframe_api'; t.onerror = rej; document.head.appendChild(t); }
+    setTimeout(() => rej(new Error('timeout')), 15000);
+  });
+}
+const PASS = 90;
+function watchState(id){ return LS.get('watch_' + id, null) || { seen: '', real: 0, dur: 0, pct: 0 }; }
+
 function viewStart(q){
   header(q.title, true);
-  const saved = LS.get('draft_' + q.id, null);
+  const saved = LS.get('draft_' + q.id, null), code = LS.get('code_' + q.id, '');
+  const lec = q.id === '0' ? '1주차 오리엔테이션' : q.id + '주차';
+  const vid = ytId((window.VIDEOS || {})[q.id]);
+  const W = watchState(q.id);
   $app.innerHTML = `
     <h1>${esc(q.title)}</h1><p class="muted">${esc(q.sub)}</p>
+    ${vid ? `<div class="card">
+      <h2 style="margin-top:0">① ${lec} 강의 시청</h2>
+      <div style="position:relative;padding-top:56.25%;border-radius:10px;overflow:hidden;background:#000"><div id="yt" style="position:absolute;inset:0;width:100%;height:100%"></div></div>
+      <div class="progress" style="margin:12px 0 4px"><div id="wbar" style="width:${W.pct}%"></div></div>
+      <p class="muted" id="wtxt" style="margin:0">시청률 ${W.pct}% · ${PASS}% 이상 시청해야 출석이 인정됩니다. 건너뛴 부분은 시청으로 계산되지 않습니다.</p>
+    </div>` : ''}
     <div class="card">
-      <p style="margin-top:0">✔ 교재나 인터넷을 보지 말고 지금 아는 만큼 풀어주세요.<br>
-      ✔ 한 문제씩 풀고, 아래 번호표로 언제든 이동할 수 있습니다.<br>
-      ✔ 제출하면 바로 점수·정답·해설${q.id==='0'?'':'과 관련 강의자료 슬라이드'}를 볼 수 있습니다.<br>
-      ✔ 중간에 앱을 닫아도 고른 답은 이 기기에 저장됩니다.</p>
+      <h2 style="margin-top:0">${vid ? '②' : '①'} 강의 수강 확인 (출석)</h2>
+      ${code ? `<p class="chip">✔ 수강 확인 완료</p><p class="muted" style="margin-bottom:0">${lec} 강의 수강이 확인되었습니다.</p>` : `
+      <p class="muted" style="margin-top:0">${lec} 강의 영상 <b>마지막 '오늘의 정리' 슬라이드</b>에 나오는 수강 확인 코드를 입력하세요.</p>
+      <label for="code">수강 확인 코드</label><input id="code" autocomplete="off" placeholder="강의 마지막 화면의 단어">
+      <label style="display:flex;gap:8px;align-items:center;font-weight:500"><input type="checkbox" id="agree" style="width:auto;margin:0"> 강의를 끝까지 들었습니다.</label>`}
     </div>
-    <button class="btn" id="st">${saved ? '이어서 풀기' : '시작하기'}</button>`;
-  document.getElementById('st').onclick = () => { go('#/solve/' + q.id); };
+    <div class="card">
+      <h2 style="margin-top:0">${vid ? '③' : '②'} 응시 안내</h2>
+      <p style="margin:0">✔ 교재나 인터넷을 보지 말고 지금 아는 만큼 풀어주세요.<br>
+      ✔ <b>처음 제출한 점수</b>가 성적 기록·통계에 쓰입니다.<br>
+      ✔ 접속·시청·제출 시각이 모두 기록됩니다.<br>
+      ✔ 제출하면 바로 점수·정답·해설${q.id==='0'?'':'과 관련 강의자료 슬라이드'}를 볼 수 있습니다.</p>
+    </div>
+    <p class="muted" id="msg" style="color:#B8342A"></p>
+    <button class="btn" id="st">${code ? (saved ? '이어서 풀기' : '시작하기') : '수강 확인하고 시작하기'}</button>`;
+
+  if (vid) startPlayer(q, vid);
+
+  document.getElementById('st').onclick = async () => {
+    if (code) { go('#/solve/' + q.id); return; }
+    const v = document.getElementById('code').value.trim(), msg = document.getElementById('msg');
+    if (vid && watchState(q.id).pct < PASS) { msg.textContent = '강의를 ' + PASS + '% 이상 시청한 뒤 수강 확인을 할 수 있습니다. (현재 ' + watchState(q.id).pct + '%)'; return; }
+    if (!v) { msg.textContent = '수강 확인 코드를 입력하세요.'; return; }
+    if (!document.getElementById('agree').checked) { msg.textContent = '"강의를 끝까지 들었습니다"에 체크하세요.'; return; }
+    if (!connected()) { LS.set('code_' + q.id, v); go('#/solve/' + q.id); return; }
+    const st = LS.get('student'), btn = document.getElementById('st');
+    btn.disabled = true; btn.textContent = '확인 중…';
+    try {
+      if (window.__flushWatch) await window.__flushWatch();
+      const res = await api({ action: 'confirm', w: q.id, sid: st.sid, name: st.name, code: v });
+      if (!res.ok) throw new Error(res.error || '확인 실패');
+      LS.set('code_' + q.id, v); go('#/solve/' + q.id);
+    } catch (e) {
+      msg.textContent = e.message; btn.disabled = false; btn.textContent = '수강 확인하고 시작하기';
+    }
+  };
+}
+
+function startPlayer(q, vid){
+  const st = LS.get('student');
+  let W = watchState(q.id), player = null, tick = 0, lastSent = -1;
+  const seen = new Set((W.seen || '').split(',').filter(Boolean).map(Number));
+  const ui = () => {
+    const b = document.getElementById('wbar'), t = document.getElementById('wtxt');
+    if (b) b.style.width = W.pct + '%';
+    if (t) t.textContent = '시청률 ' + W.pct + '%' + (W.pct >= PASS ? ' ✔ 출석 기준 충족' : ' · ' + PASS + '% 이상 시청해야 출석이 인정됩니다. 건너뛴 부분은 계산되지 않습니다.');
+  };
+  const save = () => { W.seen = Array.from(seen).join(','); LS.set('watch_' + q.id, W); };
+  const send = () => {
+    save();
+    if (!connected() || !W.dur || W.pct === lastSent) return Promise.resolve();
+    lastSent = W.pct;
+    return api({ action: 'watch', w: q.id, sid: st.sid, name: st.name, pct: W.pct, real: W.real, dur: W.dur }).catch(() => { lastSent = -1; });
+  };
+  window.__flushWatch = send;
+  loadYT().then(() => {
+    player = new YT.Player('yt', { videoId: vid, width: '100%', height: '100%',
+      playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
+      events: { onStateChange: e => { if (e.data === 2 || e.data === 0) send(); } } });
+    TIMERS.push(setInterval(() => {
+      if (!player || !player.getPlayerState || player.getPlayerState() !== 1) return;
+      const d = Math.floor(player.getDuration() || 0); if (d > 0) W.dur = d;
+      seen.add(Math.floor(player.getCurrentTime()));
+      W.real += 1;
+      W.pct = W.dur ? Math.min(100, Math.round(seen.size / W.dur * 100)) : 0;
+      ui();
+      if (++tick % 10 === 0) save();
+      if (tick % 60 === 0) send();
+    }, 1000));
+  }).catch(() => {
+    const t = document.getElementById('wtxt');
+    if (t) t.textContent = '영상 플레이어를 불러오지 못했습니다. 인터넷 연결을 확인하거나 LMS에서 강의를 들은 뒤 수강 확인 코드를 입력하세요.';
+  });
 }
 
 /* ---------- 문제 풀이 ---------- */
 function viewSolve(q){
+  if (!LS.get('code_' + q.id, '')) { go('#/q/' + q.id); return; }
   header(q.title, true);
   const n = q.items.length;
-  let d = LS.get('draft_' + q.id, null) || {ans: Array(n).fill(0), i: 0};
+  let d = LS.get('draft_' + q.id, null) || {ans: Array(n).fill(0), i: 0, t0: Date.now()};
+  if (!d.t0) d.t0 = Date.now();
   const save = () => LS.set('draft_' + q.id, d);
   function draw(){
     const it = q.items[d.i], answered = d.ans.filter(Boolean).length;
@@ -243,9 +370,8 @@ function viewSolve(q){
     const st = LS.get('student');
     $app.innerHTML = '<div class="spin"></div><p class="muted" style="text-align:center">채점 중입니다…</p>';
     try {
-      const r = await fetch(window.ENDPOINT, { method: 'POST', headers: {'Content-Type': 'text/plain;charset=utf-8'},
-        body: JSON.stringify({ w: q.id, sid: st.sid, name: st.name, answers: d.ans }) });
-      const res = await r.json();
+const res = await api({ w: q.id, sid: st.sid, name: st.name, answers: d.ans, code: LS.get('code_' + q.id, ''), secs: Math.round((Date.now() - d.t0) / 1000) });
+      if (res.codeError) LS.del('code_' + q.id);
       if (!res.ok) throw new Error(res.error || '제출 실패');
       const done = LS.get('done', {}); done[q.id] = { score: res.score, at: Date.now() }; LS.set('done', done);
       LS.set('res_' + q.id, { ans: d.ans, res });
@@ -307,21 +433,53 @@ async function viewAdmin(){
     return;
   }
   $app.innerHTML = '<div class="spin"></div>';
-  let data;
+  let data, students, PASSV = 90;
   try {
     const r = await fetch(window.ENDPOINT + '?action=dashboard&key=' + encodeURIComponent(key));
-    const j = await r.json(); if (!j.ok) throw new Error(j.error); data = j.data;
+    const j = await r.json(); if (!j.ok) throw new Error(j.error); data = j.data.quizzes; students = j.data.students; PASSV = j.data.watchPass || 90;
   } catch (e) {
     SS.del('cn3_admin');
     $app.innerHTML = `<div class="banner err">${esc(e.message)}</div><button class="btn" onclick="viewAdmin()">다시 입력</button>`; return;
   }
   const ids = Object.keys(data);
   $app.innerHTML = `
-    <div class="row"><select id="sel">${ids.map(k => `<option value="${k}">${esc(data[k].title)} (${data[k].rows.length}건)</option>`).join('')}</select></div>
+    <div class="row"><select id="sel"><option value="__att">📋 출석부 · 첫 응시 점수 (전체)</option><option value="__stu">👤 학생별 학습 기록 (접속·시청·제출 시각)</option>${ids.map(k => `<option value="${k}">${esc(data[k].title)} (${data[k].rows.length}건)</option>`).join('')}</select></div>
     <div id="dash"></div>
     <div class="row" style="margin-top:14px"><button class="btn sec" id="csv">CSV 내려받기</button><button class="btn sec" id="rf">새로고침</button></div>`;
   const sel = document.getElementById('sel');
+  const short = k => k === '0' ? '진단' : k + '주';
+  const md = t => new Date(t).toLocaleDateString('ko-KR', {month:'numeric', day:'numeric'});
+  const COLORS = {'출석': ['#E3F1E6', '#2F7D45'], '지각': ['#FBEAD6', '#9A5212'], '미제출': ['#FFF6D6', '#7A5B00'], '결석': ['#F8E1DE', '#B8342A']};
+  function drawAtt(){
+    const cnt = (k, st) => students.filter(s => s.q[k].status === st).length;
+    document.getElementById('dash').innerHTML = `
+      <h2 style="margin-top:6px">주차별 출석 요약 <span class="muted">(전체 ${students.length}명)</span></h2>
+      <div class="tbl" style="max-height:none"><table><tr><th>평가</th><th>출석</th><th>지각</th><th>미제출</th><th>결석</th><th>첫 응시 평균</th></tr>
+      ${ids.map(k => { const sc = students.map(s => s.q[k].score).filter(v => v !== null); return `<tr><td>${short(k)}</td><td>${cnt(k,'출석')}</td><td>${cnt(k,'지각')}</td><td>${cnt(k,'미제출')}</td><td>${cnt(k,'결석')}</td><td>${sc.length ? (sc.reduce((a,b)=>a+b,0)/sc.length).toFixed(1) : '-'}</td></tr>`; }).join('')}
+      </table></div>
+      <h2>학생별 출석부 <span class="muted">(칸 = 출석 상태 · 첫 응시 점수)</span></h2>
+      <div class="tbl"><table><tr><th>학번</th><th>이름</th>${ids.map(k => `<th>${short(k)}</th>`).join('')}<th>출석</th><th>결석</th></tr>
+      ${students.map(s => `<tr><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>${ids.map(k => { const x = s.q[k], c = COLORS[x.status]; return `<td style="background:${c[0]};color:${c[1]};font-weight:700">${x.status}${x.watch ? `<br><span style="font-weight:500">시청 ${x.watch.pct}%</span>` : ''}${x.score !== null ? `<br><span style="font-weight:500">${x.score}점</span>` : ''}${x.firstAt ? `<br><span class="muted" style="font-size:12px">${md(x.firstAt)}</span>` : ''}</td>`; }).join('')}<td><b>${ids.filter(k => s.q[k].status === '출석' || s.q[k].status === '지각').length}/${ids.length}</b></td><td>${ids.filter(k => s.q[k].status === '결석').length}</td></tr>`).join('')}
+      </table></div>
+      <p class="muted">출석 = 수강 확인 코드 입력 + 평가 제출(마감 전) · 지각 = 마감 후 제출 · 미제출 = 수강 확인만 하고 미제출 · 결석 = 기록 없음. 마감일은 Code.gs의 DEADLINE에서 정합니다. 점수는 모두 <b>처음 제출한 점수</b>입니다.</p>`;
+  }
+  const dt = t => t ? new Date(t).toLocaleString('ko-KR', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '–';
+  let stuIdx = 0;
+  function drawStu(){
+    if (!students.length) { document.getElementById('dash').innerHTML = '<p class="muted">아직 기록이 없습니다.</p>'; return; }
+    const s = students[stuIdx] || students[0], L = s.login;
+    document.getElementById('dash').innerHTML = `
+      <select id="stu">${students.map((x, i) => `<option value="${i}" ${i === stuIdx ? 'selected' : ''}>${esc(x.sid)} ${esc(x.name)}</option>`).join('')}</select>
+      <div class="card" style="margin-top:6px"><b>${esc(s.sid)} ${esc(s.name)}</b><br><span class="muted">첫 접속 ${L ? dt(L.first) : '–'} · 마지막 접속 ${L ? dt(L.last) : '–'} · 접속 ${L ? L.count : 0}회</span></div>
+      <div class="tbl" style="max-height:none"><table><tr><th>주차</th><th>판정</th><th>시청 시작</th><th>시청률</th><th>실제재생/길이(분)</th><th>${PASSV}% 도달</th><th>코드 확인</th><th>첫 제출</th><th>첫 점수</th><th>응시</th></tr>
+      ${ids.map(k => { const x = s.q[k], w = x.watch, c = COLORS[x.status]; return `<tr><td>${short(k)}</td><td style="background:${c[0]};color:${c[1]};font-weight:700">${x.status}</td><td>${w ? dt(w.start) : '–'}</td><td>${w ? w.pct + '%' : '–'}</td><td>${w ? (w.real || 0) + ' / ' + (w.dur || '-') : '–'}</td><td>${w ? dt(w.reach) : '–'}</td><td>${dt(x.confirmAt)}</td><td>${dt(x.firstAt)}</td><td>${x.score === null ? '–' : '<b>' + x.score + '</b>'}</td><td>${x.tries || 0}</td></tr>`; }).join('')}
+      </table></div>
+      <p class="muted">실제재생 시간이 영상 길이보다 훨씬 짧으면 배속 재생이나 건너뛰기를 의심할 수 있습니다. 시청 기록은 앱 안에서 유튜브로 본 경우에만 남습니다.</p>`;
+    document.getElementById('stu').onchange = e => { stuIdx = Number(e.target.value); drawStu(); };
+  }
   function draw(){
+    if (sel.value === '__stu') return drawStu();
+    if (sel.value === '__att') return drawAtt();
     const q = data[sel.value], first = q.rows.filter(r => r.attempt === 1), sc = first.map(r => r.score);
     const avg = sc.length ? (sc.reduce((a, b) => a + b, 0) / sc.length).toFixed(1) : '-';
     const rate = Array.from({length: q.n}, (_, i) => first.length ? Math.round(first.filter(r => r.ox[i] === 'O').length / first.length * 100) : null);
@@ -340,6 +498,21 @@ async function viewAdmin(){
   sel.onchange = draw; draw();
   document.getElementById('rf').onclick = viewAdmin;
   document.getElementById('csv').onclick = () => {
+    const dl = (lines, name) => {
+      const csv = '\ufeff' + lines.map(l => l.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'})); a.download = name; a.click();
+    };
+    if (sel.value === '__stu') {
+      const head = ['학번', '이름', '첫 접속', '마지막 접속', '접속 횟수', '주차', '판정', '시청 시작', '마지막 시청', '시청률(%)', '실제 재생(분)', '영상 길이(분)', PASSV + '% 도달', '코드 확인', '첫 제출', '첫 점수', '응시 횟수'];
+      const rows = [];
+      students.forEach(s => ids.forEach(k => { const x = s.q[k], w = x.watch || {}, L = s.login || {};
+        rows.push([s.sid, s.name, dt(L.first), dt(L.last), L.count || 0, short(k), x.status, dt(w.start), dt(w.last), w.pct === undefined ? '' : w.pct, w.real || '', w.dur || '', dt(w.reach), dt(x.confirmAt), dt(x.firstAt), x.score === null ? '' : x.score, x.tries || 0]); }));
+      return dl([head].concat(rows), '학습기록_전체.csv');
+    }
+    if (sel.value === '__att') {
+      const head = ['학번', '이름'].concat(ids.map(k => short(k) + ' 출석'), ids.map(k => short(k) + ' 첫응시점수'), ids.map(k => short(k) + ' 첫제출일'), ['출석+지각', '결석']);
+      return dl([head].concat(students.map(s => [s.sid, s.name].concat(ids.map(k => s.q[k].status), ids.map(k => s.q[k].score === null ? '' : s.q[k].score), ids.map(k => s.q[k].firstAt ? md(s.q[k].firstAt) : ''), [ids.filter(k => s.q[k].status === '출석' || s.q[k].status === '지각').length, ids.filter(k => s.q[k].status === '결석').length]))), '출석부_첫응시점수.csv');
+    }
     const q = data[sel.value];
     const head = ['제출시각', '학번', '이름', '점수', '정답수', '차수'].concat(Array.from({length: q.n}, (_, i) => 'Q' + (i + 1)));
     const lines = [head].concat(q.rows.map(r => [r.at, r.sid, r.name, r.score, r.correct, r.attempt].concat(r.ox)));
